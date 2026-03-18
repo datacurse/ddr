@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-surface: #f5f4f0;
+  --color-foreground: #1a1a1a;
+  --color-stale: rgba(0,0,0,0.3);
+  --color-muted: rgba(0,0,0,0.5);
+  --color-subtle: rgba(0,0,0,0.35);
+  --color-faint: rgba(0,0,0,0.15);
+  --color-disabled: rgba(0,0,0,0.1);
+  --color-border: rgba(0,0,0,0.4);
+  --color-border-muted: rgba(0,0,0,0.08);
+  --color-overlay: rgba(0,0,0,0.06);
+  --color-overlay-subtle: rgba(0,0,0,0.04);
+  --color-fill: rgba(0,0,0,0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: #0a0a0a;
+    --color-foreground: rgba(255,255,255,0.87);
+    --color-stale: rgba(255,255,255,0.25);
+    --color-muted: rgba(255,255,255,0.45);
+    --color-subtle: rgba(255,255,255,0.3);
+    --color-faint: rgba(255,255,255,0.15);
+    --color-disabled: rgba(255,255,255,0.1);
+    --color-border: rgba(255,255,255,0.4);
+    --color-border-muted: rgba(255,255,255,0.06);
+    --color-overlay: rgba(255,255,255,0.06);
+    --color-overlay-subtle: rgba(255,255,255,0.04);
+    --color-fill: rgba(255,255,255,0.1);
+  }
+}
