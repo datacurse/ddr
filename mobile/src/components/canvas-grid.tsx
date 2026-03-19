@@ -1,20 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { LayoutChangeEvent, PixelRatio, Pressable, StyleSheet, Text, View } from 'react-native';
-import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
-import Expo2DContext from 'expo-2d-context';
+import React, { useCallback, useMemo, useState } from 'react';
+import { LayoutChangeEvent, Pressable, StyleSheet, Text, View } from 'react-native';
+import Animated, { useAnimatedStyle } from 'react-native-reanimated';
 
 import { useTheme } from '@/context/theme-context';
 import type { Facing, Telemetry } from '@/hooks/useRobot';
-import {
-  useRobotAnimation,
-  stepAnimation,
-  cellToPixel,
-  type AnimState,
-} from '@/hooks/useRobotAnimation';
+import { useRobotAnimation, cellToPixel } from '@/hooks/useRobotAnimation';
 
 const GAP = 8;
+const PADDING = 16;
 const CORNER_LEN = 10;
-const LERP_FACTOR = 0.15;
 
 interface CanvasGridProps {
   grid: Record<string, [number, number]>;
@@ -61,7 +55,8 @@ export const CanvasGrid = React.memo(function CanvasGrid({
     if (entries.length === 0) {
       return { cols: 2, rows: 4, cells: [] as Array<{ id: number; x: number; y: number }> };
     }
-    let maxX = 0, maxY = 0;
+    let maxX = 0,
+      maxY = 0;
     const parsed = entries.map(([id, [x, y]]) => {
       if (x > maxX) maxX = x;
       if (y > maxY) maxY = y;
@@ -70,238 +65,76 @@ export const CanvasGrid = React.memo(function CanvasGrid({
     return { cols: maxX + 1, rows: maxY + 1, cells: parsed };
   }, [grid]);
 
-  const cellSize = containerWidth > 0 && containerHeight > 0
-    ? Math.min(
-        (containerWidth - GAP * (cols - 1)) / cols,
-        (containerHeight - GAP * (rows - 1)) / rows,
-      )
-    : 0;
-  const canvasWidth = cellSize > 0 ? cellSize * cols + GAP * (cols - 1) : 0;
-  const canvasHeight = cellSize > 0 ? cellSize * rows + GAP * (rows - 1) : 0;
+  const cellSize =
+    containerWidth > 0 && containerHeight > 0
+      ? Math.min(
+          (containerWidth - 2 * PADDING - GAP * (cols - 1)) / cols,
+          (containerHeight - 2 * PADDING - GAP * (rows - 1)) / rows,
+        )
+      : 0;
+  const gridWidth = cellSize > 0 ? cellSize * cols + GAP * (cols - 1) : 0;
+  const gridHeight = cellSize > 0 ? cellSize * rows + GAP * (rows - 1) : 0;
 
   // ── Animation ─────────────────────────────────────────────────
 
-  const animRef = useRobotAnimation({
-    grid, cell: robotCell, prevCell, facing, status, telemetry, turnDeg, route,
-    rows, cellSize, gap: GAP,
+  const anim = useRobotAnimation({
+    grid,
+    cell: robotCell,
+    prevCell,
+    facing,
+    status,
+    telemetry,
+    turnDeg,
+    route,
+    rows,
+    cellSize,
+    gap: GAP,
   });
 
-  // ── Drawing refs ──────────────────────────────────────────────
+  const arrowSize = cellSize * 0.3;
+  const robotViewSize = arrowSize * 2.5;
 
-  const ctxRef = useRef<Expo2DContext | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const mountedRef = useRef(true);
-
-  // Store latest props in refs so the render loop can read them without re-creating
-  const propsRef = useRef({
-    cells, cols, rows, cellSize, canvasWidth, canvasHeight,
-    routeSet: new Set(route), route,
-    robotCell, target, c, grid,
-  });
-  propsRef.current = {
-    cells, cols, rows, cellSize, canvasWidth, canvasHeight,
-    routeSet: new Set(route), route,
-    robotCell, target, c, grid,
-  };
-
-  // ── Render loop ───────────────────────────────────────────────
-
-  const draw = useCallback(() => {
-    if (!mountedRef.current) return;
-    const ctx = ctxRef.current;
-    if (!ctx) return;
-
-    const p = propsRef.current;
-    if (p.cellSize === 0) {
-      rafRef.current = requestAnimationFrame(draw);
-      return;
-    }
-
-    // Step animation
-    const anim = animRef.current;
-    stepAnimation(anim, LERP_FACTOR);
-
-    // Scale for device pixel ratio (GL buffer is in physical pixels)
-    const dpr = PixelRatio.get();
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // Clear
-    ctx.clearRect(0, 0, p.canvasWidth, p.canvasHeight);
-
-    // ── Route lines ───────────────────────────────────────────
-    if (p.route.length >= 2) {
-      ctx.strokeStyle = p.c.routeLine;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      for (let i = 0; i < p.route.length - 1; i++) {
-        const a = cellToPixel(p.route[i], p.grid, p.rows, p.cellSize, GAP);
-        const b = cellToPixel(p.route[i + 1], p.grid, p.rows, p.cellSize, GAP);
-        if (!a || !b) continue;
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-      }
-      ctx.stroke();
-    }
-
-    // ── Cells ─────────────────────────────────────────────────
-    for (const cell of p.cells) {
-      const invertedY = p.rows - 1 - cell.y;
-      const px = cell.x * (p.cellSize + GAP);
-      const py = invertedY * (p.cellSize + GAP);
-      const s = p.cellSize;
-      const isTarget = cell.id === p.target;
-      const isRobot = cell.id === p.robotCell;
-      const isOnRoute = p.routeSet.has(cell.id) && !isRobot && !isTarget;
-
-      // Background fill
-      if (isTarget || isOnRoute) {
-        ctx.fillStyle = isTarget ? p.c.targetFill : p.c.overlaySubtle;
-        ctx.fillRect(px, py, s, s);
-      }
-
-      // HUD corners (L-brackets)
-      ctx.strokeStyle = p.c.border;
-      ctx.lineWidth = 1;
-
-      // Top-left
-      ctx.beginPath();
-      ctx.moveTo(px + CORNER_LEN, py);
-      ctx.lineTo(px, py);
-      ctx.lineTo(px, py + CORNER_LEN);
-      ctx.stroke();
-
-      // Top-right
-      ctx.beginPath();
-      ctx.moveTo(px + s - CORNER_LEN, py);
-      ctx.lineTo(px + s, py);
-      ctx.lineTo(px + s, py + CORNER_LEN);
-      ctx.stroke();
-
-      // Bottom-left
-      ctx.beginPath();
-      ctx.moveTo(px + CORNER_LEN, py + s);
-      ctx.lineTo(px, py + s);
-      ctx.lineTo(px, py + s - CORNER_LEN);
-      ctx.stroke();
-
-      // Bottom-right
-      ctx.beginPath();
-      ctx.moveTo(px + s - CORNER_LEN, py + s);
-      ctx.lineTo(px + s, py + s);
-      ctx.lineTo(px + s, py + s - CORNER_LEN);
-      ctx.stroke();
-
-      // HUD edge lines (between corners)
-      ctx.strokeStyle = p.c.borderMuted;
-      ctx.beginPath();
-      // Top
-      ctx.moveTo(px + CORNER_LEN, py);
-      ctx.lineTo(px + s - CORNER_LEN, py);
-      // Bottom
-      ctx.moveTo(px + CORNER_LEN, py + s);
-      ctx.lineTo(px + s - CORNER_LEN, py + s);
-      // Left
-      ctx.moveTo(px, py + CORNER_LEN);
-      ctx.lineTo(px, py + s - CORNER_LEN);
-      // Right
-      ctx.moveTo(px + s, py + CORNER_LEN);
-      ctx.lineTo(px + s, py + s - CORNER_LEN);
-      ctx.stroke();
-
-      // Cell ID label (non-robot cells)
-      if (!isRobot) {
-        ctx.fillStyle = isTarget ? p.c.foreground : p.c.subtle;
-        ctx.font = '14px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(String(cell.id), px + s / 2, py + s / 2, s);
-      }
-    }
-
-    // ── Robot arrow ───────────────────────────────────────────
-    if (p.robotCell !== null && anim.initialized) {
-      const arrowSize = p.cellSize * 0.3;
-
-      ctx.save();
-      ctx.translate(anim.x, anim.y);
-      ctx.rotate(anim.angle);
-
-      // Triangle pointing up (north = 0)
-      ctx.fillStyle = p.c.foreground;
-      ctx.beginPath();
-      ctx.moveTo(0, -arrowSize);
-      ctx.lineTo(arrowSize * 0.7, arrowSize * 0.5);
-      ctx.lineTo(-arrowSize * 0.7, arrowSize * 0.5);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.restore();
-
-      // Small cell ID near robot (not rotated)
-      ctx.fillStyle = p.c.subtle;
-      ctx.font = '8px monospace';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'top';
-      // Find robot cell pixel position for label placement
-      const rPos = cellToPixel(p.robotCell, p.grid, p.rows, p.cellSize, GAP);
-      if (rPos) {
-        const halfCell = p.cellSize / 2;
-        ctx.fillText(String(p.robotCell), rPos.x + halfCell - 4, rPos.y - halfCell + 4, halfCell);
-      }
-    }
-
-    ctx.restore();
-    ctx.flush();
-    rafRef.current = requestAnimationFrame(draw);
-  }, []);
-
-  // ── GL context setup ──────────────────────────────────────────
-
-  const onContextCreate = useCallback(async (gl: ExpoWebGLRenderingContext) => {
-    // expo-2d-context types say `number` but it takes the GL context object
-    const ctx = new Expo2DContext(gl as unknown as number, {} as any);
-    // Must load font assets before any fillText/strokeText calls
-    await ctx.initializeText();
-    ctxRef.current = ctx;
-    // Kick off the render loop
-    rafRef.current = requestAnimationFrame(draw);
-  }, [draw]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-      }
+  const robotAnimatedStyle = useAnimatedStyle(() => {
+    if (!anim.initialized.value) return { opacity: 0 };
+    return {
+      opacity: 1,
+      transform: [
+        { translateX: anim.x.value - robotViewSize / 2 },
+        { translateY: anim.y.value - robotViewSize / 2 },
+        { rotate: `${anim.angle.value}rad` },
+      ],
     };
-  }, []);
+  });
 
-  // ── Touch handling ────────────────────────────────────────────
+  // ── Route line segments ───────────────────────────────────────
 
-  const handlePress = useCallback(
-    (evt: { nativeEvent: { locationX: number; locationY: number } }) => {
-      if (disabled) return;
-      const { locationX, locationY } = evt.nativeEvent;
-      const p = propsRef.current;
-      for (const cell of p.cells) {
-        const invertedY = p.rows - 1 - cell.y;
-        const px = cell.x * (p.cellSize + GAP);
-        const py = invertedY * (p.cellSize + GAP);
-        if (
-          locationX >= px && locationX <= px + p.cellSize &&
-          locationY >= py && locationY <= py + p.cellSize &&
-          cell.id !== p.robotCell
-        ) {
-          onCellPress(cell.id);
-          return;
-        }
+  const routeSegments = useMemo(() => {
+    if (route.length < 2 || cellSize === 0) return [];
+    const segs: Array<{ left: number; top: number; width: number; height: number }> = [];
+    for (let i = 0; i < route.length - 1; i++) {
+      const a = cellToPixel(route[i], grid, rows, cellSize, GAP);
+      const b = cellToPixel(route[i + 1], grid, rows, cellSize, GAP);
+      if (!a || !b) continue;
+      if (Math.abs(a.y - b.y) < 1) {
+        segs.push({
+          left: Math.min(a.x, b.x),
+          top: a.y - 1.5,
+          width: Math.abs(b.x - a.x),
+          height: 3,
+        });
+      } else {
+        segs.push({
+          left: a.x - 1.5,
+          top: Math.min(a.y, b.y),
+          width: 3,
+          height: Math.abs(b.y - a.y),
+        });
       }
-    },
-    [disabled, onCellPress],
-  );
+    }
+    return segs;
+  }, [route, grid, rows, cellSize]);
+
+  const routeSet = useMemo(() => new Set(route), [route]);
 
   // ── Render ────────────────────────────────────────────────────
 
@@ -320,17 +153,211 @@ export const CanvasGrid = React.memo(function CanvasGrid({
   }
 
   return (
-    <View onLayout={onLayout} style={{ flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' }}>
-      <View style={{ width: canvasWidth, height: canvasHeight, position: 'relative' }}>
-        <GLView
-          style={{ width: canvasWidth, height: canvasHeight }}
-          onContextCreate={onContextCreate}
-        />
-        <Pressable
-          style={[StyleSheet.absoluteFill, { width: canvasWidth, height: canvasHeight }]}
-          onPress={handlePress}
-        />
+    <View
+      onLayout={onLayout}
+      style={{ flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' }}
+    >
+      <View style={{ width: gridWidth, height: gridHeight, position: 'relative' }}>
+        {/* Route line segments */}
+        {routeSegments.map((seg, i) => (
+          <View
+            key={`r${i}`}
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              backgroundColor: c.routeLine,
+              left: seg.left,
+              top: seg.top,
+              width: seg.width,
+              height: seg.height,
+            }}
+          />
+        ))}
+
+        {/* Grid cells */}
+        {cells.map((cell) => {
+          const invertedY = rows - 1 - cell.y;
+          const px = cell.x * (cellSize + GAP);
+          const py = invertedY * (cellSize + GAP);
+          const isTarget = cell.id === target;
+          const isRobot = cell.id === robotCell;
+          const isOnRoute = routeSet.has(cell.id) && !isRobot && !isTarget;
+
+          return (
+            <Pressable
+              key={cell.id}
+              android_ripple={null}
+              disabled={disabled || isRobot}
+              onPress={() => onCellPress(cell.id)}
+              style={{
+                position: 'absolute',
+                left: px,
+                top: py,
+                width: cellSize,
+                height: cellSize,
+              }}
+            >
+              {/* Background highlight */}
+              {(isTarget || isOnRoute) && (
+                <View
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { backgroundColor: isTarget ? c.targetFill : c.overlaySubtle },
+                  ]}
+                />
+              )}
+
+              {/* HUD corner brackets */}
+              <View style={[styles.corner, styles.tl, { borderColor: c.border }]} />
+              <View style={[styles.corner, styles.tr, { borderColor: c.border }]} />
+              <View style={[styles.corner, styles.bl, { borderColor: c.border }]} />
+              <View style={[styles.corner, styles.br, { borderColor: c.border }]} />
+
+              {/* HUD edge lines */}
+              <View
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: CORNER_LEN,
+                  right: CORNER_LEN,
+                  height: 1,
+                  backgroundColor: c.borderMuted,
+                }}
+              />
+              <View
+                style={{
+                  position: 'absolute',
+                  bottom: 0,
+                  left: CORNER_LEN,
+                  right: CORNER_LEN,
+                  height: 1,
+                  backgroundColor: c.borderMuted,
+                }}
+              />
+              <View
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: CORNER_LEN,
+                  bottom: CORNER_LEN,
+                  width: 1,
+                  backgroundColor: c.borderMuted,
+                }}
+              />
+              <View
+                style={{
+                  position: 'absolute',
+                  right: 0,
+                  top: CORNER_LEN,
+                  bottom: CORNER_LEN,
+                  width: 1,
+                  backgroundColor: c.borderMuted,
+                }}
+              />
+
+              {/* Cell ID */}
+              {isRobot ? (
+                <Text
+                  style={{
+                    position: 'absolute',
+                    top: 4,
+                    right: 4,
+                    fontFamily: 'IBMPlexMono_400Regular',
+                    fontSize: 8,
+                    color: c.subtle,
+                  }}
+                >
+                  {cell.id}
+                </Text>
+              ) : (
+                <View
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { justifyContent: 'center', alignItems: 'center' },
+                  ]}
+                >
+                  <Text
+                    style={{
+                      fontFamily: 'IBMPlexMono_400Regular',
+                      fontSize: 14,
+                      color: isTarget ? c.foreground : c.subtle,
+                    }}
+                  >
+                    {cell.id}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+          );
+        })}
+
+        {/* Robot arrow */}
+        {robotCell !== null && (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              {
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                width: robotViewSize,
+                height: robotViewSize,
+                justifyContent: 'center',
+                alignItems: 'center',
+              },
+              robotAnimatedStyle,
+            ]}
+          >
+            <View
+              style={{
+                width: 0,
+                height: 0,
+                marginTop: -arrowSize * 0.25,
+                borderLeftWidth: arrowSize * 0.7,
+                borderRightWidth: arrowSize * 0.7,
+                borderBottomWidth: arrowSize * 1.5,
+                borderLeftColor: 'transparent',
+                borderRightColor: 'transparent',
+                borderBottomColor: c.foreground,
+              }}
+            />
+          </Animated.View>
+        )}
       </View>
     </View>
   );
+});
+
+// ── Static styles ───────────────────────────────────────────────
+
+const styles = StyleSheet.create({
+  corner: {
+    position: 'absolute',
+    width: CORNER_LEN,
+    height: CORNER_LEN,
+  },
+  tl: {
+    top: 0,
+    left: 0,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+  },
+  tr: {
+    top: 0,
+    right: 0,
+    borderTopWidth: 1,
+    borderRightWidth: 1,
+  },
+  bl: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+  },
+  br: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: 1,
+    borderRightWidth: 1,
+  },
 });

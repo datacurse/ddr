@@ -1,4 +1,9 @@
 import { useEffect, useRef } from 'react';
+import {
+  useSharedValue,
+  withTiming,
+  type SharedValue,
+} from 'react-native-reanimated';
 import type { Facing, Telemetry } from './useRobot';
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -38,24 +43,6 @@ function shortestAngleDelta(from: number, to: number): number {
   return delta;
 }
 
-// ── Animation state ───────────────────────────────────────────────
-
-export interface AnimState {
-  x: number;
-  y: number;
-  angle: number;
-  targetX: number;
-  targetY: number;
-  targetAngle: number;
-  initialized: boolean;
-}
-
-const INITIAL_ANIM: AnimState = {
-  x: 0, y: 0, angle: 0,
-  targetX: 0, targetY: 0, targetAngle: 0,
-  initialized: false,
-};
-
 // ── Hook ──────────────────────────────────────────────────────────
 
 interface UseRobotAnimationParams {
@@ -72,6 +59,13 @@ interface UseRobotAnimationParams {
   gap: number;
 }
 
+export interface RobotAnimationValues {
+  x: SharedValue<number>;
+  y: SharedValue<number>;
+  angle: SharedValue<number>;
+  initialized: SharedValue<boolean>;
+}
+
 export function useRobotAnimation({
   grid,
   cell,
@@ -84,27 +78,28 @@ export function useRobotAnimation({
   rows,
   cellSize,
   gap,
-}: UseRobotAnimationParams) {
-  const animRef = useRef<AnimState>({ ...INITIAL_ANIM });
+}: UseRobotAnimationParams): RobotAnimationValues {
+  const x = useSharedValue(0);
+  const y = useSharedValue(0);
+  const angle = useSharedValue(0);
+  const initialized = useSharedValue(false);
+
   const lastFacing = useRef<Facing | null>(null);
   const turnAnimating = useRef(false);
 
-  // -- Position: always target current cell (telemetry effect overrides during movement) --
+  // -- Position: target current cell --
   useEffect(() => {
     if (cell === null || cellSize === 0) return;
-
     const pos = cellToPixel(cell, grid, rows, cellSize, gap);
     if (!pos) return;
 
-    const a = animRef.current;
-    if (!a.initialized) {
-      // First time: snap
-      a.x = a.targetX = pos.x;
-      a.y = a.targetY = pos.y;
-      a.initialized = true;
+    if (!initialized.value) {
+      x.value = pos.x;
+      y.value = pos.y;
+      initialized.value = true;
     } else {
-      a.targetX = pos.x;
-      a.targetY = pos.y;
+      x.value = withTiming(pos.x, { duration: 150 });
+      y.value = withTiming(pos.y, { duration: 150 });
     }
   }, [cell, cellSize, gap, rows, grid]);
 
@@ -115,11 +110,8 @@ export function useRobotAnimation({
 
     let toId: number;
     if (prevCell !== cell) {
-      // After MOVE_DONE: prevCell is departure, cell is arrival
       toId = cell;
     } else {
-      // Mid-move (before MOVE_DONE): prevCell === cell === departure
-      // Look up destination from route
       const idx = route.indexOf(prevCell);
       toId = idx >= 0 && idx + 1 < route.length ? route[idx + 1] : cell;
     }
@@ -131,40 +123,46 @@ export function useRobotAnimation({
     const total = telemetry.d_mm + telemetry.rem_mm;
     const progress = total > 0 ? telemetry.d_mm / total : 0;
 
-    animRef.current.targetX = fromPos.x + (toPos.x - fromPos.x) * progress;
-    animRef.current.targetY = fromPos.y + (toPos.y - fromPos.y) * progress;
+    x.value = withTiming(
+      fromPos.x + (toPos.x - fromPos.x) * progress,
+      { duration: 100 },
+    );
+    y.value = withTiming(
+      fromPos.y + (toPos.y - fromPos.y) * progress,
+      { duration: 100 },
+    );
   }, [telemetry, prevCell, cell, route, cellSize, gap, rows, grid, status]);
 
   // -- Rotation: animate on turn_start --
   useEffect(() => {
     if (turnDeg !== null) {
       const deltaRad = (turnDeg * Math.PI) / 180;
-      animRef.current.targetAngle = animRef.current.angle + deltaRad;
+      angle.value = withTiming(angle.value + deltaRad, { duration: 400 });
       turnAnimating.current = true;
     }
   }, [turnDeg]);
 
-  // -- Rotation: snap on facing change --
+  // -- Rotation: snap/smooth on facing change --
   useEffect(() => {
     if (!facing) return;
     if (lastFacing.current === facing) return;
 
     const target = FACING_ANGLE[facing];
-    const a = animRef.current;
 
-    if (!a.initialized || lastFacing.current === null) {
+    if (lastFacing.current === null) {
       // First time: snap
-      a.angle = a.targetAngle = target;
+      angle.value = target;
     } else if (turnAnimating.current) {
-      // Turn animation was running → snap to exact facing
-      const delta = shortestAngleDelta(a.angle, target);
-      a.angle = a.angle + delta;
-      a.targetAngle = a.angle;
+      // Turn animation was running -> snap to exact facing (handle wraparound)
+      const current = angle.value;
+      const normalized =
+        target + Math.round((current - target) / (2 * Math.PI)) * (2 * Math.PI);
+      angle.value = normalized;
       turnAnimating.current = false;
     } else {
-      // State sync without a turn animation → set target (lerp will handle)
-      const delta = shortestAngleDelta(a.angle, target);
-      a.targetAngle = a.angle + delta;
+      // State sync -> smooth transition via shortest path
+      const delta = shortestAngleDelta(angle.value, target);
+      angle.value = withTiming(angle.value + delta, { duration: 300 });
     }
 
     lastFacing.current = facing;
@@ -173,25 +171,14 @@ export function useRobotAnimation({
   // -- Reset when disconnected --
   useEffect(() => {
     if (cell === null) {
-      animRef.current = { ...INITIAL_ANIM };
+      x.value = 0;
+      y.value = 0;
+      angle.value = 0;
+      initialized.value = false;
       lastFacing.current = null;
       turnAnimating.current = false;
     }
   }, [cell]);
 
-  return animRef;
-}
-
-/** Advance animation state one tick (call from rAF loop). Returns true if still moving. */
-export function stepAnimation(anim: AnimState, lerpFactor = 0.15): boolean {
-  const dx = anim.targetX - anim.x;
-  const dy = anim.targetY - anim.y;
-  const da = shortestAngleDelta(anim.angle, anim.targetAngle);
-
-  anim.x += dx * lerpFactor;
-  anim.y += dy * lerpFactor;
-  anim.angle += da * lerpFactor;
-
-  // Return true if still animating (not settled)
-  return Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5 || Math.abs(da) > 0.005;
+  return { x, y, angle, initialized };
 }
