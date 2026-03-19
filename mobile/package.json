@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "scripts": {
     "start": "expo start --tunnel",
-    "dev": "expo start --tunnel",
+    "dev": "fuser -k 8081/tcp 2>/dev/null; expo start --tunnel",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",

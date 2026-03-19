@@ -35,6 +35,7 @@ interface RobotState {
   turnDeg: number | null;
   error: string | null;
   logs: LogEntry[];
+  connectionHealth: 'healthy' | 'stale' | null;
 }
 
 // ── Reducer ────────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ type Action =
   | { type: 'CONNECT_START' }
   | { type: 'CONNECTED' }
   | { type: 'DISCONNECTED' }
+  | { type: 'RECONNECTING'; delay: number }
   | { type: 'STATE_UPDATE'; cell: number; facing: Facing; status: string; target: number | null }
   | { type: 'GRID_UPDATE'; cells: Record<string, [number, number]> }
   | { type: 'NAV_START'; cell: number; target: number; route: number[] }
@@ -54,7 +56,8 @@ type Action =
   | { type: 'STOPPED'; cell: number }
   | { type: 'ERROR'; message: string }
   | { type: 'CLEAR_ERROR' }
-  | { type: 'CLEAR_LOGS' };
+  | { type: 'CLEAR_LOGS' }
+  | { type: 'HEALTH_UPDATE'; health: 'healthy' | 'stale' | null };
 
 const INITIAL_STATE: RobotState = {
   connection: 'disconnected',
@@ -69,6 +72,7 @@ const INITIAL_STATE: RobotState = {
   turnDeg: null,
   error: null,
   logs: [],
+  connectionHealth: null,
 };
 
 let _logId = 0;
@@ -85,10 +89,13 @@ function reducer(state: RobotState, action: Action): RobotState {
       return { ...INITIAL_STATE, connection: 'connecting', logs: appendLog(state.logs, 'connect', 'Connecting…') };
 
     case 'CONNECTED':
-      return { ...state, connection: 'connected', logs: appendLog(state.logs, 'connect', 'Connected') };
+      return { ...state, connection: 'connected', connectionHealth: null, logs: appendLog(state.logs, 'connect', 'Connected') };
 
     case 'DISCONNECTED':
-      return { ...INITIAL_STATE, logs: appendLog(state.logs, 'connect', 'Disconnected') };
+      return { ...INITIAL_STATE, connectionHealth: null, logs: appendLog(state.logs, 'connect', 'Disconnected') };
+
+    case 'RECONNECTING':
+      return { ...state, connection: 'connecting', logs: appendLog(state.logs, 'connect', `Reconnecting in ${(action.delay / 1000).toFixed(0)}s…`) };
 
     case 'STATE_UPDATE':
       return {
@@ -97,7 +104,7 @@ function reducer(state: RobotState, action: Action): RobotState {
         facing: action.facing,
         status: action.status,
         target: action.target,
-        ...(action.status === 'idle' ? { route: [], telemetry: null } : {}),
+        ...(action.status === 'idle' ? { route: [], telemetry: null, connectionHealth: null } : {}),
         logs: appendLog(state.logs, 'state', `Cell ${action.cell} · ${action.facing} · ${action.status}`),
       };
 
@@ -141,6 +148,7 @@ function reducer(state: RobotState, action: Action): RobotState {
         route: [],
         telemetry: null,
         turnDeg: null,
+        connectionHealth: null,
         logs: appendLog(state.logs, 'nav', `Nav complete · cell ${action.cell} · ${action.facing}`),
       };
 
@@ -154,6 +162,7 @@ function reducer(state: RobotState, action: Action): RobotState {
         route: [],
         telemetry: null,
         turnDeg: null,
+        connectionHealth: null,
         logs: appendLog(state.logs, 'stop', `Stopped at cell ${action.cell}`),
       };
 
@@ -165,6 +174,9 @@ function reducer(state: RobotState, action: Action): RobotState {
 
     case 'CLEAR_LOGS':
       return { ...state, logs: [] };
+
+    case 'HEALTH_UPDATE':
+      return { ...state, connectionHealth: action.health };
 
     default:
       return state;
@@ -225,6 +237,10 @@ function computeRouteCells(
 
 // ── Hook ───────────────────────────────────────────────────────────
 
+const MAX_RECONNECT_DELAY = 10000;
+const HEALTH_CHECK_INTERVAL = 2000;
+const STALE_THRESHOLD = 5000;
+
 export function useRobot() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const wsRef = useRef<WebSocket | null>(null);
@@ -233,12 +249,44 @@ export function useRobot() {
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  // Auto-reconnect refs
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectDelayRef = useRef(1000);
+  const intentionalCloseRef = useRef(false);
+  const lastIpRef = useRef<string | null>(null);
+
+  // Connection health ref
+  const lastMessageRef = useRef<number>(Date.now());
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      intentionalCloseRef.current = true;
       wsRef.current?.close();
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     };
+  }, []);
+
+  // Connection health monitoring
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const s = stateRef.current;
+      if (s.connection !== 'connected') return;
+      const isActive = s.status === 'moving' || s.status === 'turning' || s.status === 'navigating';
+      if (!isActive) {
+        if (s.connectionHealth !== null) {
+          dispatch({ type: 'HEALTH_UPDATE', health: null });
+        }
+        return;
+      }
+      const elapsed = Date.now() - lastMessageRef.current;
+      const health = elapsed > STALE_THRESHOLD ? 'stale' : 'healthy';
+      if (health !== s.connectionHealth) {
+        dispatch({ type: 'HEALTH_UPDATE', health });
+      }
+    }, HEALTH_CHECK_INTERVAL);
+    return () => clearInterval(interval);
   }, []);
 
   const dispatchError = useCallback((message: string) => {
@@ -248,6 +296,14 @@ export function useRobot() {
   }, []);
 
   const connect = useCallback((ip: string) => {
+    // Cancel any pending reconnect
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    intentionalCloseRef.current = false;
+    lastIpRef.current = ip;
+
     // Close existing connection
     wsRef.current?.close();
     dispatch({ type: 'CONNECT_START' });
@@ -257,11 +313,25 @@ export function useRobot() {
 
     ws.onopen = () => {
       dispatch({ type: 'CONNECTED' });
+      reconnectDelayRef.current = 1000; // reset backoff on success
     };
 
     ws.onclose = () => {
       dispatch({ type: 'DISCONNECTED' });
       wsRef.current = null;
+
+      // Auto-reconnect on unexpected close
+      if (!intentionalCloseRef.current && lastIpRef.current) {
+        const delay = reconnectDelayRef.current;
+        dispatch({ type: 'RECONNECTING', delay });
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          if (lastIpRef.current) {
+            connect(lastIpRef.current);
+          }
+        }, delay);
+        reconnectDelayRef.current = Math.min(delay * 2, MAX_RECONNECT_DELAY);
+      }
     };
 
     ws.onerror = () => {
@@ -269,6 +339,7 @@ export function useRobot() {
     };
 
     ws.onmessage = (event) => {
+      lastMessageRef.current = Date.now();
       try {
         const msg = JSON.parse(event.data);
 
@@ -351,6 +422,12 @@ export function useRobot() {
   }, [dispatchError]);
 
   const disconnect = useCallback(() => {
+    intentionalCloseRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    lastIpRef.current = null;
     wsRef.current?.close();
   }, []);
 

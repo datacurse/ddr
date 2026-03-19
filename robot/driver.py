@@ -138,12 +138,14 @@ class Driver:
                 print(f"           MOVE {cmd['steps']}")
         print()
 
+        interrupted = False
         for i, cmd in enumerate(cmds):
             if not self._running or self._stop_event.is_set():
                 self.hw.stop()
                 self.hw.disable()
                 print(f"  {ts()}  interrupted!")
                 _emit("stopped", {"cell": self.cell})
+                interrupted = True
                 break
 
             if cmd["type"] == "turn":
@@ -181,11 +183,16 @@ class Driver:
                 else:
                     print(f"\n  {ts()}  [{i+1}/{len(cmds)}] MOVE interrupted")
                     _emit("stopped", {"cell": self.cell})
+                    interrupted = True
                     break
 
-        _emit("nav_done", {"cell": self.cell, "facing": self.facing})
-        print(f"  {ts()}  done -- cell {self.cell}, "
-              f"facing {self.facing} {DIR_ARROW[self.facing]}\n")
+        if not interrupted:
+            _emit("nav_done", {"cell": self.cell, "facing": self.facing})
+            print(f"  {ts()}  done -- cell {self.cell}, "
+                  f"facing {self.facing} {DIR_ARROW[self.facing]}\n")
+        else:
+            print(f"  {ts()}  navigation interrupted -- cell {self.cell}, "
+                  f"facing {self.facing} {DIR_ARROW[self.facing]}\n")
 
         self.logger.close()
 

@@ -114,6 +114,8 @@ class RobotServer:
             self.status = "idle"
             self.target = None
             self.route = None
+            self._telemetry = {}
+            # Sync client state even if nav_done/stopped was lost
             self._broadcast_soon(self._state_msg())
 
     def _on_driver_event(self, event, data):
@@ -130,6 +132,7 @@ class RobotServer:
 
         elif event == "turn_start":
             self.status = "turning"
+            self._telemetry = {}
             self._broadcast_soon({"type": "turn_start", "deg": data.get("deg")})
 
         elif event == "turn_done":
@@ -150,6 +153,7 @@ class RobotServer:
             }
 
         elif event == "move_done":
+            self._telemetry = {}
             self._broadcast_soon({
                 "type": "move_done",
                 "cell": data.get("cell"),
@@ -163,6 +167,7 @@ class RobotServer:
             })
 
         elif event == "stopped":
+            self._telemetry = {}
             self._broadcast_soon({
                 "type": "stopped",
                 "cell": data.get("cell"),
