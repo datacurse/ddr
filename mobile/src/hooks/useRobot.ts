@@ -123,10 +123,10 @@ function reducer(state: RobotState, action: Action): RobotState {
       };
 
     case 'TURN_START':
-      return { ...state, status: 'turning', turnDeg: action.deg, logs: appendLog(state.logs, 'nav', `Turning ${action.deg}°`) };
+      return { ...state, prevCell: state.cell, status: 'turning', turnDeg: action.deg, telemetry: null, logs: appendLog(state.logs, 'nav', `Turning ${action.deg}°`) };
 
     case 'TURN_DONE':
-      return { ...state, facing: action.facing, status: 'navigating', turnDeg: null, logs: appendLog(state.logs, 'nav', `Turn done · facing ${action.facing}`) };
+      return { ...state, facing: action.facing, status: 'navigating', turnDeg: null, telemetry: null, logs: appendLog(state.logs, 'nav', `Turn done · facing ${action.facing}`) };
 
     case 'TELEMETRY':
       return {
@@ -135,7 +135,7 @@ function reducer(state: RobotState, action: Action): RobotState {
       };
 
     case 'MOVE_DONE':
-      return { ...state, prevCell: state.cell, cell: action.cell, status: 'navigating', logs: appendLog(state.logs, 'nav', `Move done · cell ${action.cell}`) };
+      return { ...state, cell: action.cell, status: 'navigating', logs: appendLog(state.logs, 'nav', `Move done · cell ${action.cell}`) };
 
     case 'NAV_DONE':
       return {

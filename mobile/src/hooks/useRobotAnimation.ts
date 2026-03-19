@@ -107,28 +107,45 @@ export function useRobotAnimation({
   useEffect(() => {
     if (!telemetry || prevCell === null || cell === null || cellSize === 0) return;
     if (status !== 'navigating' && status !== 'moving') return;
+    if (route.length < 2) return;
 
-    let toId: number;
-    if (prevCell !== cell) {
-      toId = cell;
-    } else {
-      const idx = route.indexOf(prevCell);
-      toId = idx >= 0 && idx + 1 < route.length ? route[idx + 1] : cell;
+    const idx = route.indexOf(prevCell);
+    if (idx < 0 || idx + 1 >= route.length) return;
+
+    // Count consecutive same-direction cells from prevCell (= current move segment count)
+    const p0 = grid[String(route[idx])];
+    const p1 = grid[String(route[idx + 1])];
+    if (!p0 || !p1) return;
+    const dx = p1[0] - p0[0];
+    const dy = p1[1] - p0[1];
+
+    let moveEnd = idx + 1;
+    while (moveEnd + 1 < route.length) {
+      const pa = grid[String(route[moveEnd])];
+      const pb = grid[String(route[moveEnd + 1])];
+      if (!pa || !pb || pb[0] - pa[0] !== dx || pb[1] - pa[1] !== dy) break;
+      moveEnd++;
     }
 
-    const fromPos = cellToPixel(prevCell, grid, rows, cellSize, gap);
-    const toPos = cellToPixel(toId, grid, rows, cellSize, gap);
-    if (!fromPos || !toPos) return;
-
+    const moveSegments = moveEnd - idx;
     const total = telemetry.d_mm + telemetry.rem_mm;
     const progress = total > 0 ? telemetry.d_mm / total : 0;
 
+    // Map overall progress across all segments of this move
+    const scaled = progress * moveSegments;
+    const segIdx = Math.min(Math.floor(scaled), moveSegments - 1);
+    const localProgress = scaled - segIdx;
+
+    const fromPos = cellToPixel(route[idx + segIdx], grid, rows, cellSize, gap);
+    const toPos = cellToPixel(route[idx + segIdx + 1], grid, rows, cellSize, gap);
+    if (!fromPos || !toPos) return;
+
     x.value = withTiming(
-      fromPos.x + (toPos.x - fromPos.x) * progress,
+      fromPos.x + (toPos.x - fromPos.x) * localProgress,
       { duration: 100 },
     );
     y.value = withTiming(
-      fromPos.y + (toPos.y - fromPos.y) * progress,
+      fromPos.y + (toPos.y - fromPos.y) * localProgress,
       { duration: 100 },
     );
   }, [telemetry, prevCell, cell, route, cellSize, gap, rows, grid, status]);
